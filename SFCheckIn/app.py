@@ -231,9 +231,9 @@ full_max_date = full_max_dt.date()
 logo_col, hero_col = st.columns([1.15, 5], vertical_alignment="center")
 
 with logo_col:
-    if os.path.exists("sfLogo.png"):
+    if os.path.exists("SFCheckIn/sfLogo.png"):
         st.markdown("<div style='margin-top:-25px;'>", unsafe_allow_html=True)
-        st.image("sfLogo.png", use_container_width=True)
+        st.image("SFCheckIn/sfLogo.png", use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
 with hero_col:
