@@ -34,6 +34,7 @@ jobs:
       - run: pip install -r ingest/requirements.txt
       - name: Run ingest
         env:
+          PYTHONUNBUFFERED: "1"
           ABC_APP_ID: ${{ secrets.ABC_APP_ID }}
           ABC_APP_KEY: ${{ secrets.ABC_APP_KEY }}
           GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}

@@ -126,6 +126,8 @@ def fetch_pages(path, list_key, params):
         data = abc_get(path, {**params, "page": page, "size": PAGE_SIZE})
         batch = data.get(list_key) or []
         records.extend(batch)
+        if page % 10 == 0:
+            print(f"  {path}: {len(records)} records so far (page {page})", flush=True)
         if not batch or not (data.get("status") or {}).get("nextPage"):
             return records
         page += 1
