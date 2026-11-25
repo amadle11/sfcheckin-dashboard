@@ -219,6 +219,10 @@ SELECT
 FROM `sigfit.checkInData.checkin_clean`
 """)
 
+if full_range_df.empty or pd.isna(full_range_df.iloc[0]["min_dt"]):
+    st.warning("No check-in data in BigQuery yet. The ABC import may not have run.")
+    st.stop()
+
 full_min_dt = pd.to_datetime(full_range_df.iloc[0]["min_dt"])
 full_max_dt = pd.to_datetime(full_range_df.iloc[0]["max_dt"])
 
@@ -357,16 +361,6 @@ GROUP BY hour_24
 ORDER BY hour_24
 """, selected_start, selected_end)
 
-gender_split = run_query_with_dates("""
-SELECT
-  COALESCE(gender, 'Unknown') AS gender,
-  COUNT(*) AS checkins
-FROM `sigfit.checkInData.checkin_clean`
-WHERE DATE(checkin_datetime) BETWEEN @start_date AND @end_date
-GROUP BY gender
-ORDER BY checkins DESC
-""", selected_start, selected_end)
-
 engagement = run_query_with_dates("""
 WITH member_visits AS (
   SELECT
@@ -395,8 +389,7 @@ SELECT
   ANY_VALUE(member_name) AS member_name,
   COUNT(*) AS visits,
   MIN(checkin_datetime) AS first_visit,
-  MAX(checkin_datetime) AS last_visit,
-  ANY_VALUE(gender) AS gender
+  MAX(checkin_datetime) AS last_visit
 FROM `sigfit.checkInData.checkin_clean`
 WHERE DATE(checkin_datetime) BETWEEN @start_date AND @end_date
 GROUP BY agreement_number
@@ -410,8 +403,7 @@ SELECT
   ANY_VALUE(member_name) AS member_name,
   COUNT(*) AS visits,
   MAX(checkin_datetime) AS last_visit,
-  DATETIME_DIFF(CURRENT_DATETIME(), MAX(checkin_datetime), DAY) AS days_inactive,
-  ANY_VALUE(gender) AS gender
+  DATETIME_DIFF(CURRENT_DATETIME("America/New_York"), MAX(checkin_datetime), DAY) AS days_inactive
 FROM `sigfit.checkInData.checkin_clean`
 WHERE DATE(checkin_datetime) BETWEEN @start_date AND @end_date
 GROUP BY agreement_number
@@ -521,35 +513,18 @@ st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
 # --------------------------------------------------
 # CHARTS ROW 1
 # --------------------------------------------------
-left, right = st.columns([2, 1])
+st.markdown('<div class="sf-card-title">Monthly Trend</div>', unsafe_allow_html=True)
+st.markdown('<div class="sf-card-sub">Overall gym traffic over time</div>', unsafe_allow_html=True)
 
-with left:
-    st.markdown('<div class="sf-card-title">Monthly Trend</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sf-card-sub">Overall gym traffic over time</div>', unsafe_allow_html=True)
-
-    fig_monthly = px.line(
-        monthly,
-        x="month",
-        y="checkins",
-        markers=True
-    )
-    fig_monthly.update_traces(line=dict(color="#2563eb", width=4), marker=dict(color="#2563eb", size=9))
-    fig_monthly.update_layout(height=410, margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(fig_monthly, use_container_width=True)
-
-with right:
-    st.markdown('<div class="sf-card-title">Gender Split</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sf-card-sub">Check-in volume by gender</div>', unsafe_allow_html=True)
-
-    fig_gender = px.pie(
-        gender_split,
-        names="gender",
-        values="checkins",
-        hole=0.5,
-        color_discrete_sequence=["#2563eb", "#60a5fa", "#93c5fd", "#1e3a8a"]
-    )
-    fig_gender.update_layout(height=410, margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(fig_gender, use_container_width=True)
+fig_monthly = px.line(
+    monthly,
+    x="month",
+    y="checkins",
+    markers=True
+)
+fig_monthly.update_traces(line=dict(color="#2563eb", width=4), marker=dict(color="#2563eb", size=9))
+fig_monthly.update_layout(height=410, margin=dict(l=10, r=10, t=10, b=10))
+st.plotly_chart(fig_monthly, use_container_width=True)
 
 st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
 
