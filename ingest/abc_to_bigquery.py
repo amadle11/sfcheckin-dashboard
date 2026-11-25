@@ -6,7 +6,8 @@ Usage (normally run by GitHub Actions, see .github/workflows/ingest.yml):
     python ingest/abc_to_bigquery.py                     # today (club time)
     python ingest/abc_to_bigquery.py --start 2026-06-01 --end 2026-11-24   # backfill
     python ingest/abc_to_bigquery.py --probe             # print API field names only, load nothing
-    python ingest/abc_to_bigquery.py --setup             # create the table + view (safe to re-run)
+    python ingest/abc_to_bigquery.py --setup             # create the tables + view (safe to re-run)
+    python ingest/abc_to_bigquery.py --members           # refresh member names (daily)
 
 Environment variables:
     ABC_APP_ID, ABC_APP_KEY      ABC API credentials
@@ -21,7 +22,6 @@ logs counts and field NAMES, never member names or values.
 """
 
 import argparse
-import hashlib
 import json
 import os
 import sys
@@ -40,6 +40,7 @@ PAGE_SIZE = 500
 PROJECT = "sigfit"
 DATASET = "checkInData"
 RAW_TABLE = f"{PROJECT}.{DATASET}.checkins_raw"
+MEMBERS_TABLE = f"{PROJECT}.{DATASET}.members"
 VIEW = f"{PROJECT}.{DATASET}.checkin_clean"  # the name the dashboard already reads
 
 SCHEMA = [
@@ -58,20 +59,37 @@ SCHEMA = [
     bigquery.SchemaField("loaded_at", "TIMESTAMP"),
 ]
 
-# The dashboard keeps reading `checkin_clean`; this view maps the new table onto the
+# Only the member fields the dashboard needs. ABC also returns address, phone, birth
+# date and gender; we deliberately don't store those.
+MEMBERS_SCHEMA = [
+    bigquery.SchemaField("member_id", "STRING"),
+    bigquery.SchemaField("agreement_number", "STRING"),
+    bigquery.SchemaField("first_name", "STRING"),
+    bigquery.SchemaField("last_name", "STRING"),
+    bigquery.SchemaField("barcode", "STRING"),
+    bigquery.SchemaField("member_status", "STRING"),
+    bigquery.SchemaField("join_status", "STRING"),
+    bigquery.SchemaField("home_club", "STRING"),
+    bigquery.SchemaField("loaded_at", "TIMESTAMP"),
+]
+
+# The dashboard keeps reading `checkin_clean`; this view maps the new tables onto the
 # column names app.py already uses. No gender column (business rule).
 VIEW_SQL = f"""
 SELECT
-  checkin_id,
-  checkin_datetime,
-  member_id AS agreement_number,
-  TRIM(CONCAT(IFNULL(first_name, ''), ' ', IFNULL(last_name, ''))) AS member_name,
-  barcode,
-  checkin_status,
-  station,
-  checkin_club,
-  home_club
-FROM `{RAW_TABLE}`
+  c.checkin_id,
+  c.checkin_datetime,
+  COALESCE(m.agreement_number, c.member_id) AS agreement_number,
+  c.member_id,
+  TRIM(CONCAT(IFNULL(m.first_name, ''), ' ', IFNULL(m.last_name, ''))) AS member_name,
+  m.barcode,
+  m.member_status,
+  c.checkin_status,
+  c.station,
+  c.checkin_club,
+  c.home_club
+FROM `{RAW_TABLE}` c
+LEFT JOIN `{MEMBERS_TABLE}` m USING (member_id)
 """
 
 
@@ -95,66 +113,69 @@ def abc_get(path, params):
     return resp.json()
 
 
-SUMMARIES = "/members/checkins/summaries"
-# ABC's summaries endpoint returns only a check-in COUNT per member for a time range,
-# not the time of each visit. So we ask about one short slot at a time: a member who
-# shows up in the 6:15-6:30 slot checked in during that slot. 15 minutes is plenty for
-# hour-of-day charts, the heatmap and a rolling 90-minute crowd meter.
-SLOT_MINUTES = int(os.environ.get("SLOT_MINUTES", "15"))
+DETAILS = "/clubs/checkins/details"  # one record per check-in, with exact time
 
 
 def fmt(dt):
     return dt.strftime("%Y-%m-%d %H:%M:%S.%f")
 
 
-def fetch_summaries(start, end):
-    """All member summaries for check-ins between start and end (club local time)."""
-    ts_range = f"{fmt(start)},{fmt(end)}"
+def fetch_pages(path, list_key, params):
     records, page = [], 1
     while True:
-        data = abc_get(SUMMARIES, {"checkInTimestampRange": ts_range, "page": page, "size": PAGE_SIZE})
-        batch = data.get("members") or []
+        data = abc_get(path, {**params, "page": page, "size": PAGE_SIZE})
+        batch = data.get(list_key) or []
         records.extend(batch)
         if not batch or not (data.get("status") or {}).get("nextPage"):
             return records
         page += 1
 
 
-def visit_count(member):
-    """checkInCounts looks like {"checkInCount": [{"count": "1", "club": "8027"}]}."""
-    counts = (member.get("checkInCounts") or {}).get("checkInCount") or []
-    if isinstance(counts, dict):
-        counts = [counts]
-    return sum(int(c.get("count") or 0) for c in counts if str(c.get("club", CLUB)) == CLUB)
-
-
 def fetch_day(day):
+    start = datetime.combine(day, datetime.min.time())
+    end = start + timedelta(days=1) - timedelta(microseconds=1)
+    checkins = fetch_pages(DETAILS, "checkins", {"checkInTimestampRange": f"{fmt(start)},{fmt(end)}"})
     loaded_at = datetime.now(timezone.utc).isoformat()
-    now = datetime.now(CLUB_TZ).replace(tzinfo=None)
-    slot = datetime.combine(day, datetime.min.time())
-    day_end = slot + timedelta(days=1)
     rows = []
-    while slot < day_end and slot <= now:
-        slot_end = slot + timedelta(minutes=SLOT_MINUTES) - timedelta(microseconds=1)
-        for m in fetch_summaries(slot, slot_end):
-            member_id = m.get("memberId")
-            for n in range(visit_count(m)):
-                rows.append({
-                    "checkin_id": hashlib.sha1(f"{member_id}|{slot.isoformat()}|{n}".encode()).hexdigest(),
-                    "checkin_date": day.isoformat(),
-                    "checkin_datetime": slot.strftime("%Y-%m-%d %H:%M:%S"),  # start of the slot
-                    "member_id": member_id,
-                    "first_name": None,
-                    "last_name": None,
-                    "barcode": None,
-                    "checkin_status": None,
-                    "station": None,
-                    "checkin_club": CLUB,
-                    "home_club": None,
-                    "raw_json": json.dumps(m, default=str),
-                    "loaded_at": loaded_at,
-                })
-        slot += timedelta(minutes=SLOT_MINUTES)
+    for c in checkins:
+        ts = str(c.get("checkInTimestamp") or "")[:19]
+        if not ts.startswith(day.isoformat()):
+            continue
+        member = c.get("member") or {}
+        rows.append({
+            "checkin_id": c.get("checkInId"),
+            "checkin_date": day.isoformat(),
+            "checkin_datetime": ts.replace("T", " "),
+            "member_id": member.get("memberId"),
+            "first_name": None,
+            "last_name": None,
+            "barcode": None,
+            "checkin_status": c.get("checkInStatus"),
+            "station": c.get("stationName"),
+            "checkin_club": CLUB,
+            "home_club": member.get("homeClub"),
+            "raw_json": json.dumps(c, default=str),
+            "loaded_at": loaded_at,
+        })
+    return rows
+
+
+def fetch_members():
+    loaded_at = datetime.now(timezone.utc).isoformat()
+    rows = []
+    for m in fetch_pages("/members", "members", {}):
+        personal = m.get("personal") or {}
+        rows.append({
+            "member_id": m.get("memberId"),
+            "agreement_number": (m.get("agreement") or {}).get("agreementNumber"),
+            "first_name": personal.get("firstName"),
+            "last_name": personal.get("lastName"),
+            "barcode": personal.get("barcode"),
+            "member_status": personal.get("memberStatus"),
+            "join_status": personal.get("joinStatus"),
+            "home_club": personal.get("homeClub"),
+            "loaded_at": loaded_at,
+        })
     return rows
 
 
@@ -184,6 +205,7 @@ def setup(client):
     table = client.create_table(table, exists_ok=True)
     table.expires = None
     client.update_table(table, ["expires"])
+    client.create_table(bigquery.Table(MEMBERS_TABLE, schema=MEMBERS_SCHEMA), exists_ok=True)
     view = bigquery.Table(VIEW)
     view.view_query = VIEW_SQL
     client.delete_table(VIEW, not_found_ok=True)  # an old table/view with this name may exist
@@ -202,6 +224,12 @@ def load_day(client, day, rows):
     )
     partition = f"{RAW_TABLE}${day.strftime('%Y%m%d')}"
     client.load_table_from_json(rows, partition, job_config=job_config).result()
+
+
+def load_members(client, rows):
+    job_config = bigquery.LoadJobConfig(
+        schema=MEMBERS_SCHEMA, write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE)
+    client.load_table_from_json(rows, MEMBERS_TABLE, job_config=job_config).result()
 
 
 # --------------------------------------------------
@@ -231,34 +259,11 @@ def describe(value, indent="  ", key=""):
 
 
 def probe(day):
-    """Print response structures (no member data) and check which endpoints exist."""
+    """Print response structure for one check-in (no member data)."""
     start = datetime.combine(day, datetime.min.time())
     end = start + timedelta(days=1) - timedelta(microseconds=1)
-    ts_range = f"{fmt(start)},{fmt(end)}"
-    for path in ["/members/checkins/details", "/checkins/details", "/checkins",
-                 "/members/checkins", "/clubs/checkins/details", "/members/checkins/history"]:
-        resp = requests.get(f"{BASE_URL}{path}", headers=abc_headers(), timeout=60,
-                            params={"checkInTimestampRange": ts_range, "page": 1, "size": 1})
-        print(f"{path}: HTTP {resp.status_code}")
-        if resp.status_code == 200:
-            describe(resp.json())
-
-    data = abc_get(SUMMARIES, {"checkInTimestampRange": ts_range, "page": 1, "size": 1})
-    member_id = (data.get("members") or [{}])[0].get("memberId")
-    if member_id:
-        for path in [f"/members/{member_id}", f"/members/{member_id}/checkins"]:
-            resp = requests.get(f"{BASE_URL}{path}", headers=abc_headers(), timeout=60)
-            print(f"{path.replace(member_id, '<id>')}: HTTP {resp.status_code}")
-            if resp.status_code == 200:
-                describe(resp.json())
-    resp = requests.get(f"{BASE_URL}/members", headers=abc_headers(), timeout=60, params={"page": 1, "size": 1})
-    print(f"/members (list): HTTP {resp.status_code}")
-    if resp.status_code == 200:
-        describe(resp.json())
-
-    slot_end = start + timedelta(minutes=SLOT_MINUTES) - timedelta(microseconds=1)
-    print(f"Slot check: {len(fetch_summaries(start.replace(hour=18), slot_end.replace(hour=18)))} members "
-          f"in the 6:00-6:{SLOT_MINUTES:02d} PM slot on {day}")
+    data = abc_get(DETAILS, {"checkInTimestampRange": f"{fmt(start)},{fmt(end)}", "page": 1, "size": 1})
+    describe(data)
 
 
 def main():
@@ -267,6 +272,7 @@ def main():
     p.add_argument("--end", type=date.fromisoformat)
     p.add_argument("--probe", action="store_true")
     p.add_argument("--setup", action="store_true")
+    p.add_argument("--members", action="store_true", help="refresh the members table (names)")
     args = p.parse_args()
 
     now = datetime.now(CLUB_TZ)
@@ -282,8 +288,14 @@ def main():
     client = bq_client()
     if args.setup:
         setup(client)
-        if not (args.start or args.end):
-            return
+
+    if args.members:
+        rows = fetch_members()
+        load_members(client, rows)
+        print(f"Members table refreshed: {len(rows)} members.")
+
+    if (args.setup or args.members) and not (args.start or args.end):
+        return
 
     total, day = 0, start
     while day <= end:
