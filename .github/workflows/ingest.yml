@@ -1,0 +1,48 @@
+name: ABC check-ins to BigQuery
+
+on:
+  schedule:
+    - cron: "15 * * * *"   # every hour at :15 (UTC); pulls today + yesterday, club time
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "normal, setup (create table/view), or probe (show API field names)"
+        default: normal
+        type: choice
+        options: [normal, setup, probe]
+      start:
+        description: "Backfill start date, YYYY-MM-DD (optional)"
+        required: false
+      end:
+        description: "Backfill end date, YYYY-MM-DD (optional)"
+        required: false
+
+concurrency:
+  group: abc-ingest
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r ingest/requirements.txt
+      - name: Run ingest
+        env:
+          ABC_APP_ID: ${{ secrets.ABC_APP_ID }}
+          ABC_APP_KEY: ${{ secrets.ABC_APP_KEY }}
+          GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
+          MODE: ${{ inputs.mode || 'normal' }}
+          START: ${{ inputs.start }}
+          END: ${{ inputs.end }}
+        run: |
+          ARGS=""
+          [ "$MODE" = "setup" ] && ARGS="$ARGS --setup"
+          [ "$MODE" = "probe" ] && ARGS="$ARGS --probe"
+          [ -n "$START" ] && ARGS="$ARGS --start $START"
+          [ -n "$END" ] && ARGS="$ARGS --end $END"
+          python ingest/abc_to_bigquery.py $ARGS
