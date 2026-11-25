@@ -30,10 +30,10 @@ block with the new key's values (same format as before). Keep `app_password` as 
 ## 5. Run it (Repo → Actions → "ABC check-ins to BigQuery" → Run workflow)
 1. **mode = probe**: prints only the field *names* ABC returns. Send these to Claude so we can confirm the mapping.
 2. **mode = setup**: creates the `checkins_raw` table and the `checkin_clean` view the dashboard reads.
-3. **Backfill**: mode = normal with a start and end date. Do **one month per run** (e.g. `2026-10-01` to `2026-10-31`).
-   ABC only returns check-in *counts*, so each day is read in 96 fifteen-minute slots; a month takes a while.
-   Each day is pulled separately, and re-running a day replaces it, so there are no duplicates.
+3. **mode = members**: loads member names (runs daily on its own after this).
+4. **Backfill**: mode = normal with a start and end date. Do about **3 months per run**
+   (e.g. `2025-01-01` to `2025-03-31`); a run can last up to 6 hours. Re-running a day replaces it.
 
-After that, the hourly schedule keeps today and yesterday up to date on its own.
+After that, the hourly schedule keeps today up to date and refreshes names daily on its own.
 
 Note: Actions logs in a public repo are public. The script only logs counts and field names, never member data.
