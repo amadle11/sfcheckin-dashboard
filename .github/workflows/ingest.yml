@@ -2,7 +2,7 @@ name: ABC check-ins to BigQuery
 
 on:
   schedule:
-    - cron: "15 * * * *"   # every hour at :15 (UTC); pulls today + yesterday, club time
+    - cron: "15 * * * *"   # every hour at :15 (UTC); pulls today (club time)
   workflow_dispatch:
     inputs:
       mode:
@@ -26,8 +26,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: pip install -r ingest/requirements.txt
