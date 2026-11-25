@@ -188,10 +188,18 @@ def bq_client():
 
 
 def setup(client):
-    client.create_dataset(f"{PROJECT}.{DATASET}", exists_ok=True)
+    # Datasets created while the project was a sandbox keep a 60-day default expiry even
+    # after billing is turned on. Clear it so new tables never expire.
+    ds = client.create_dataset(f"{PROJECT}.{DATASET}", exists_ok=True)
+    ds.default_table_expiration_ms = None
+    ds.default_partition_expiration_ms = None
+    client.update_dataset(ds, ["default_table_expiration_ms", "default_partition_expiration_ms"])
+
     table = bigquery.Table(RAW_TABLE, schema=SCHEMA)
     table.time_partitioning = bigquery.TimePartitioning(field="checkin_date", expiration_ms=None)
     table = client.create_table(table, exists_ok=True)
+    table.expires = None
+    client.update_table(table, ["expires"])
     view = bigquery.Table(VIEW)
     view.view_query = VIEW_SQL
     client.delete_table(VIEW, not_found_ok=True)  # an old table/view with this name may exist
