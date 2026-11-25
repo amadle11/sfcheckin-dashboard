@@ -3,14 +3,15 @@ import pandas as pd
 import plotly.express as px
 from google.cloud import bigquery
 from google.oauth2 import service_account
-from datetime import timedelta
+from datetime import timedelta, timezone
+from zoneinfo import ZoneInfo
 import os
 
 # --------------------------------------------------
 # PAGE CONFIG
 # --------------------------------------------------
 st.set_page_config(
-    page_title="Signature Fitness Dashboard",
+    page_title="Signature Fitness Member Check-In Dashboard",
     page_icon="📊",
     layout="wide"
 )
@@ -29,7 +30,7 @@ def check_password():
         """
         <div style="max-width:700px;margin:80px auto 0 auto;padding:36px;border:1px solid #e7eaf0;
                     border-radius:24px;background:#ffffff;box-shadow:0 10px 30px rgba(0,0,0,.05);">
-            <h1 style="margin:0 0 8px 0;">Signature Fitness Dashboard</h1>
+            <h1 style="margin:0 0 8px 0;">Signature Fitness Member Check-In Dashboard</h1>
             <p style="color:#667085;font-size:16px;margin:0 0 24px 0;">
                 Private internal dashboard
             </p>
@@ -41,7 +42,7 @@ def check_password():
     st.markdown("<div style='max-width:700px;margin:0 auto;'>", unsafe_allow_html=True)
     entered_password = st.text_input("Enter password", type="password")
 
-    if st.button("Log in", use_container_width=True):
+    if st.button("Log in", width="stretch"):
         expected_password = st.secrets["app_password"]
         if entered_password == expected_password:
             st.session_state.authenticated = True
@@ -203,6 +204,21 @@ def run_query_with_dates(query: str, start_date, end_date) -> pd.DataFrame:
     )
     return client.query(query, job_config=job_config).to_dataframe()
 
+@st.cache_data(ttl=600)
+def run_query_with_cutoff(query: str, cutoff_mmdd: str) -> pd.DataFrame:
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("cutoff", "STRING", cutoff_mmdd)]
+    )
+    return client.query(query, job_config=job_config).to_dataframe()
+
+CLUB_TZ = ZoneInfo("America/New_York")
+MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+def pct_change(new, old):
+    if not old:
+        return None
+    return f"{(new - old) / old * 100:+.1f}%"
+
 def format_ampm(dt_value):
     if pd.isna(dt_value):
         return ""
@@ -237,19 +253,137 @@ logo_col, hero_col = st.columns([1.15, 5], vertical_alignment="center")
 with logo_col:
     if os.path.exists("SFCheckIn/sfLogo.png"):
         st.markdown("<div style='margin-top:-25px;'>", unsafe_allow_html=True)
-        st.image("SFCheckIn/sfLogo.png", use_container_width=True)
+        st.image("SFCheckIn/sfLogo.png", width="stretch")
         st.markdown("</div>", unsafe_allow_html=True)
 
 with hero_col:
     st.markdown(
         """
         <div class="sf-hero">
-            <div class="sf-hero-title">Signature Fitness Dashboard</div>
+            <div class="sf-hero-title">Signature Fitness Member Check-In Dashboard</div>
             <div class="sf-hero-sub">Member check-in intelligence</div>
         </div>
         """,
         unsafe_allow_html=True
     )
+
+# --------------------------------------------------
+# LAST UPDATED + REFRESH
+# --------------------------------------------------
+last_loaded = run_query("SELECT MAX(loaded_at) AS last_loaded FROM `sigfit.checkInData.checkins_raw`")
+last_loaded_ts = pd.to_datetime(last_loaded.iloc[0]["last_loaded"]) if not last_loaded.empty else None
+
+u1, u2 = st.columns([5, 1], vertical_alignment="center")
+with u1:
+    if last_loaded_ts is not None and not pd.isna(last_loaded_ts):
+        if last_loaded_ts.tzinfo is None:
+            last_loaded_ts = last_loaded_ts.tz_localize("UTC")
+        local = last_loaded_ts.tz_convert(CLUB_TZ)
+        st.caption(
+            f"**Last updated from ABC:** {format_ampm(local.tz_localize(None))} ET "
+            f"· **Latest check-in:** {format_ampm(full_max_dt)} · New data arrives about every hour"
+        )
+with u2:
+    if st.button("🔄 Refresh data", width="stretch"):
+        st.cache_data.clear()
+        st.rerun()
+
+# --------------------------------------------------
+# YEAR OVER YEAR (always full years; not affected by Report Filters)
+# --------------------------------------------------
+st.markdown("<div style='height:6px;'></div>", unsafe_allow_html=True)
+st.subheader("Year over Year")
+
+# Compare through the last full day, so this year's partial day isn't compared to
+# a full day last year.
+cutoff_date = full_max_date - timedelta(days=1)
+cutoff_mmdd = cutoff_date.strftime("%m%d")
+st.caption(
+    f"Each year from Jan 1 through **{cutoff_date.strftime('%b %-d')}**, so the comparison is like for like. "
+    "This section always uses full years and ignores the Report Filters below."
+)
+
+ytd = run_query_with_cutoff("""
+SELECT
+  EXTRACT(YEAR FROM checkin_datetime) AS year,
+  COUNT(*) AS checkins,
+  COUNT(DISTINCT agreement_number) AS unique_members,
+  COUNT(DISTINCT DATE(checkin_datetime)) AS days_with_checkins
+FROM `sigfit.checkInData.checkin_clean`
+WHERE FORMAT_DATETIME('%m%d', checkin_datetime) <= @cutoff
+GROUP BY year
+ORDER BY year
+""", cutoff_mmdd)
+
+monthly_by_year = run_query("""
+SELECT
+  EXTRACT(YEAR FROM checkin_datetime) AS year,
+  EXTRACT(MONTH FROM checkin_datetime) AS month_num,
+  COUNT(*) AS checkins,
+  COUNT(DISTINCT agreement_number) AS unique_members,
+  COUNT(DISTINCT DATE(checkin_datetime)) AS days_with_checkins
+FROM `sigfit.checkInData.checkin_clean`
+GROUP BY year, month_num
+ORDER BY year, month_num
+""")
+
+if len(ytd) >= 2:
+    cur, prev = ytd.iloc[-1], ytd.iloc[-2]
+    cy, py = int(cur["year"]), int(prev["year"])
+    cur_avg = cur["checkins"] / max(cur["days_with_checkins"], 1)
+    prev_avg = prev["checkins"] / max(prev["days_with_checkins"], 1)
+    k1, k2, k3 = st.columns(3)
+    k1.metric(f"Check-ins, {cy} to date", f"{int(cur['checkins']):,}",
+              pct_change(cur["checkins"], prev["checkins"]),
+              help=f"{py} same period: {int(prev['checkins']):,}")
+    k2.metric(f"Unique members, {cy} to date", f"{int(cur['unique_members']):,}",
+              pct_change(cur["unique_members"], prev["unique_members"]),
+              help=f"{py} same period: {int(prev['unique_members']):,}")
+    k3.metric(f"Avg check-ins per day, {cy}", f"{cur_avg:,.0f}",
+              pct_change(cur_avg, prev_avg),
+              help=f"{py} same period: {prev_avg:,.0f}")
+    st.caption(f"Arrows compare with {py} over the same dates.")
+elif len(ytd) == 1:
+    st.info("Only one year of data so far. Comparisons appear once there are two years.")
+
+if not monthly_by_year.empty:
+    metric_label = st.radio(
+        "Compare by",
+        ["Total check-ins", "Avg check-ins per day", "Unique members"],
+        index=1,
+        horizontal=True,
+        help="Avg per day is the default because the current month isn't finished yet, so its total looks low.",
+    )
+    mby = monthly_by_year.copy()
+    mby["Avg check-ins per day"] = (mby["checkins"] / mby["days_with_checkins"].clip(lower=1)).round(0)
+    mby = mby.rename(columns={"checkins": "Total check-ins", "unique_members": "Unique members"})
+    mby["Month"] = mby["month_num"].astype(int).apply(lambda m: MONTH_NAMES[m - 1])
+    mby["Year"] = mby["year"].astype(int).astype(str)
+
+    fig_yoy = px.line(
+        mby, x="Month", y=metric_label, color="Year", markers=True,
+        category_orders={"Month": MONTH_NAMES},
+        color_discrete_sequence=["#94a3b8", "#2563eb", "#111111", "#60a5fa", "#1e3a8a"],
+    )
+    fig_yoy.update_traces(line=dict(width=4), marker=dict(size=8))
+    fig_yoy.update_layout(height=400, margin=dict(l=10, r=10, t=10, b=10), legend_title_text="")
+    st.plotly_chart(fig_yoy, width="stretch")
+
+    table = mby.pivot(index="Month", columns="Year", values=metric_label).reindex(MONTH_NAMES)
+    table = table.dropna(how="all")
+    years = list(table.columns)
+    if len(years) >= 2:
+        a, b = years[-2], years[-1]
+        table[f"Change {a}→{b}"] = ((table[b] - table[a]) / table[a] * 100).round(1).map(
+            lambda v: "" if pd.isna(v) else f"{v:+.1f}%"
+        )
+    for y in years:
+        table[y] = table[y].map(lambda v: "" if pd.isna(v) else f"{int(v):,}")
+    current_month = MONTH_NAMES[full_max_date.month - 1]
+    st.caption(f"{current_month} {full_max_date.year} is still in progress.")
+    st.dataframe(table, width="stretch")
+
+st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
 
 # --------------------------------------------------
 # FILTERS
@@ -262,13 +396,20 @@ f1, f2 = st.columns([2, 3])
 with f1:
     preset = st.radio(
         "Date View",
-        ["Full Data", "Last 30 Days", "Last 90 Days", "Last 6 Months", "Custom Range"],
+        ["Full Data", "This Year", "Last Year", "Last 30 Days", "Last 90 Days", "Last 6 Months", "Custom Range"],
         horizontal=False
     )
 
 if preset == "Full Data":
     selected_start = full_min_date
     selected_end = full_max_date
+elif preset == "This Year":
+    selected_end = full_max_date
+    selected_start = max(full_min_date, full_max_date.replace(month=1, day=1))
+elif preset == "Last Year":
+    last_year = full_max_date.year - 1
+    selected_start = max(full_min_date, full_max_date.replace(year=last_year, month=1, day=1))
+    selected_end = min(full_max_date, full_max_date.replace(year=last_year, month=12, day=31))
 elif preset == "Last 30 Days":
     selected_end = full_max_date
     selected_start = max(full_min_date, full_max_date - timedelta(days=29))
@@ -524,7 +665,7 @@ fig_monthly = px.line(
 )
 fig_monthly.update_traces(line=dict(color="#2563eb", width=4), marker=dict(color="#2563eb", size=9))
 fig_monthly.update_layout(height=410, margin=dict(l=10, r=10, t=10, b=10))
-st.plotly_chart(fig_monthly, use_container_width=True)
+st.plotly_chart(fig_monthly, width="stretch")
 
 st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
 
@@ -544,7 +685,7 @@ with c1:
 
     fig_day = px.bar(day_of_week, x="day_name", y="checkins", color_discrete_sequence=["#2563eb"])
     fig_day.update_layout(height=350, margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(fig_day, use_container_width=True)
+    st.plotly_chart(fig_day, width="stretch")
 
 with c2:
     st.markdown('<div class="sf-card-title">Hour of Day</div>', unsafe_allow_html=True)
@@ -555,7 +696,7 @@ with c2:
 
     fig_hour = px.bar(hour_of_day, x="hour_label", y="checkins", color_discrete_sequence=["#1d4ed8"])
     fig_hour.update_layout(height=350, margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(fig_hour, use_container_width=True)
+    st.plotly_chart(fig_hour, width="stretch")
 
 with c3:
     st.markdown('<div class="sf-card-title">Engagement Buckets</div>', unsafe_allow_html=True)
@@ -568,7 +709,7 @@ with c3:
 
     fig_eng = px.bar(engagement, x="engagement_bucket", y="member_count", color_discrete_sequence=["#2563eb"])
     fig_eng.update_layout(height=350, margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(fig_eng, use_container_width=True)
+    st.plotly_chart(fig_eng, width="stretch")
 
 st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
 
@@ -580,12 +721,12 @@ t1, t2 = st.columns(2)
 with t1:
     st.markdown('<div class="sf-card-title">Top Members</div>', unsafe_allow_html=True)
     st.markdown('<div class="sf-card-sub">Most active members in the selected range</div>', unsafe_allow_html=True)
-    st.dataframe(top_members, use_container_width=True, hide_index=True)
+    st.dataframe(top_members, width="stretch", hide_index=True)
 
 with t2:
     st.markdown('<div class="sf-card-title">Inactive Members</div>', unsafe_allow_html=True)
     st.markdown('<div class="sf-card-sub">Longest gap since last recorded visit</div>', unsafe_allow_html=True)
-    st.dataframe(inactive_members, use_container_width=True, hide_index=True)
+    st.dataframe(inactive_members, width="stretch", hide_index=True)
 
 st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
 
@@ -607,4 +748,4 @@ if not heatmap.empty:
         color_continuous_scale="Blues"
     )
     fig_heat.update_layout(height=430, margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(fig_heat, use_container_width=True)
+    st.plotly_chart(fig_heat, width="stretch")
