@@ -30,7 +30,8 @@ block with the new key's values (same format as before). Keep `app_password` as 
 ## 5. Run it (Repo → Actions → "ABC check-ins to BigQuery" → Run workflow)
 1. **mode = probe**: prints only the field *names* ABC returns. Send these to Claude so we can confirm the mapping.
 2. **mode = setup**: creates the `checkins_raw` table and the `checkin_clean` view the dashboard reads.
-3. **Backfill**: mode = normal with a start and end date (e.g. `2026-01-01` to yesterday).
+3. **Backfill**: mode = normal with a start and end date. Do **one month per run** (e.g. `2026-10-01` to `2026-10-31`).
+   ABC only returns check-in *counts*, so each day is read in 96 fifteen-minute slots; a month takes a while.
    Each day is pulled separately, and re-running a day replaces it, so there are no duplicates.
 
 After that, the hourly schedule keeps today and yesterday up to date on its own.
