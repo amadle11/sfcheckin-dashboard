@@ -78,14 +78,17 @@ FROM `{RAW_TABLE}`
 # --------------------------------------------------
 # ABC API
 # --------------------------------------------------
-def abc_get(path, params):
-    headers = {
+def abc_headers():
+    return {
         "Accept": "application/json;charset=UTF-8",
         "app_id": os.environ["ABC_APP_ID"],
         "app_key": os.environ["ABC_APP_KEY"],
         "clubNumber": CLUB,
     }
-    resp = requests.get(f"{BASE_URL}{path}", headers=headers, params=params, timeout=60)
+
+
+def abc_get(path, params):
+    resp = requests.get(f"{BASE_URL}{path}", headers=abc_headers(), params=params, timeout=60)
     if resp.status_code != 200:
         # Status + short body only; error bodies don't contain member data.
         raise RuntimeError(f"ABC {path} returned {resp.status_code}: {resp.text[:300]}")
@@ -93,7 +96,11 @@ def abc_get(path, params):
 
 
 SUMMARIES = "/members/checkins/summaries"
-MIN_WINDOW = timedelta(minutes=5)
+# ABC's summaries endpoint returns only a check-in COUNT per member for a time range,
+# not the time of each visit. So we ask about one short slot at a time: a member who
+# shows up in the 6:15-6:30 slot checked in during that slot. 15 minutes is plenty for
+# hour-of-day charts, the heatmap and a rolling 90-minute crowd meter.
+SLOT_MINUTES = int(os.environ.get("SLOT_MINUTES", "15"))
 
 
 def fmt(dt):
@@ -113,76 +120,42 @@ def fetch_summaries(start, end):
         page += 1
 
 
-def fetch_window(start, end, out):
-    """
-    ABC's REST API has no per-check-in endpoint, only per-member summaries
-    (checkInCount + lastCheckInTimestamp) for a time range. When every member in a
-    window checked in once, lastCheckInTimestamp IS that check-in's time. If anyone
-    checked in more than once, split the window in half and try again. Most members
-    visit once a day, so a day usually takes only a handful of calls.
-    """
-    members = fetch_summaries(start, end)
-    multi = any(int(m.get("checkInCount") or 0) > 1 for m in members)
-    if multi and end - start > MIN_WINDOW:
-        mid = start + (end - start) / 2
-        fetch_window(start, mid, out)
-        fetch_window(mid + timedelta(microseconds=1), end, out)
-    else:
-        out.extend(members)
-
-
-def first(d, *keys):
-    """Return the first non-empty value among keys."""
-    for k in keys:
-        if isinstance(d, dict) and d.get(k) not in (None, ""):
-            return d[k]
-    return None
-
-
-def parse_ts(value):
-    """ABC timestamps look like '2026-11-24 18:03:12.000000' (club local time)."""
-    if not value:
-        return None
-    s = str(value).replace("T", " ")[:19]
-    return datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
-
-
-def build_rows(day, members):
-    loaded_at = datetime.now(timezone.utc).isoformat()
-    rows, seen = [], set()
-    for m in members:
-        ts = parse_ts(first(m, "lastCheckInTimestamp"))
-        member_id = first(m, "memberId")
-        if ts is None or ts.date() != day:
-            continue
-        checkin_id = hashlib.sha1(f"{member_id}|{ts.isoformat()}".encode()).hexdigest()
-        if checkin_id in seen:
-            continue
-        seen.add(checkin_id)
-        rows.append({
-            "checkin_id": checkin_id,
-            "checkin_date": ts.date().isoformat(),
-            "checkin_datetime": ts.strftime("%Y-%m-%d %H:%M:%S"),
-            "member_id": str(member_id) if member_id else None,
-            "first_name": first(m, "firstName"),
-            "last_name": first(m, "lastName"),
-            "barcode": str(first(m, "barcode") or "") or None,
-            "checkin_status": None,
-            "station": None,
-            "checkin_club": CLUB,
-            "home_club": str(first(m, "homeClub") or "") or None,
-            "raw_json": json.dumps(m, default=str),
-            "loaded_at": loaded_at,
-        })
-    return rows
+def visit_count(member):
+    """checkInCounts looks like {"checkInCount": [{"count": "1", "club": "8027"}]}."""
+    counts = (member.get("checkInCounts") or {}).get("checkInCount") or []
+    if isinstance(counts, dict):
+        counts = [counts]
+    return sum(int(c.get("count") or 0) for c in counts if str(c.get("club", CLUB)) == CLUB)
 
 
 def fetch_day(day):
-    start = datetime.combine(day, datetime.min.time())
-    end = start + timedelta(days=1) - timedelta(microseconds=1)
-    members = []
-    fetch_window(start, end, members)
-    return build_rows(day, members)
+    loaded_at = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(CLUB_TZ).replace(tzinfo=None)
+    slot = datetime.combine(day, datetime.min.time())
+    day_end = slot + timedelta(days=1)
+    rows = []
+    while slot < day_end and slot <= now:
+        slot_end = slot + timedelta(minutes=SLOT_MINUTES) - timedelta(microseconds=1)
+        for m in fetch_summaries(slot, slot_end):
+            member_id = m.get("memberId")
+            for n in range(visit_count(m)):
+                rows.append({
+                    "checkin_id": hashlib.sha1(f"{member_id}|{slot.isoformat()}|{n}".encode()).hexdigest(),
+                    "checkin_date": day.isoformat(),
+                    "checkin_datetime": slot.strftime("%Y-%m-%d %H:%M:%S"),  # start of the slot
+                    "member_id": member_id,
+                    "first_name": None,
+                    "last_name": None,
+                    "barcode": None,
+                    "checkin_status": None,
+                    "station": None,
+                    "checkin_club": CLUB,
+                    "home_club": None,
+                    "raw_json": json.dumps(m, default=str),
+                    "loaded_at": loaded_at,
+                })
+        slot += timedelta(minutes=SLOT_MINUTES)
+    return rows
 
 
 # --------------------------------------------------
@@ -234,7 +207,7 @@ def load_day(client, day, rows):
 # --------------------------------------------------
 # Main
 # --------------------------------------------------
-SAFE_VALUE_HINTS = ("count", "timestamp", "club", "rel", "type", "status")
+SAFE_VALUE_HINTS = ("count", "timestamp", "club", "rel", "type", "status", "nextpage")
 
 
 def describe(value, indent="  ", key=""):
@@ -246,7 +219,7 @@ def describe(value, indent="  ", key=""):
                 print(f"{indent}{k}: {type(v).__name__}")
                 describe(v, indent + "  ", k)
             else:
-                show = any(h in k.lower() for h in SAFE_VALUE_HINTS)
+                show = any(h in k.lower() for h in SAFE_VALUE_HINTS) and "country" not in k.lower()
                 if k.lower() == "href" and isinstance(v, str):
                     import re
                     v, show = re.sub(r"[0-9a-fA-F-]{16,}", "<id>", v), True
@@ -258,17 +231,34 @@ def describe(value, indent="  ", key=""):
 
 
 def probe(day):
-    """Print the response structure from the summaries endpoint (no member data)."""
+    """Print response structures (no member data) and check which endpoints exist."""
     start = datetime.combine(day, datetime.min.time())
     end = start + timedelta(days=1) - timedelta(microseconds=1)
-    data = abc_get(SUMMARIES, {"checkInTimestampRange": f"{fmt(start)},{fmt(end)}", "page": 1, "size": 5})
-    print(f"{SUMMARIES} on {day}, first page of 5:")
-    print("top level:")
-    describe({k: v for k, v in data.items() if k != "members"})
-    members = data.get("members") or []
-    for i, m in enumerate(members[:2]):
-        print(f"member #{i + 1}:")
-        describe(m)
+    ts_range = f"{fmt(start)},{fmt(end)}"
+    for path in ["/members/checkins/details", "/checkins/details", "/checkins",
+                 "/members/checkins", "/clubs/checkins/details", "/members/checkins/history"]:
+        resp = requests.get(f"{BASE_URL}{path}", headers=abc_headers(), timeout=60,
+                            params={"checkInTimestampRange": ts_range, "page": 1, "size": 1})
+        print(f"{path}: HTTP {resp.status_code}")
+        if resp.status_code == 200:
+            describe(resp.json())
+
+    data = abc_get(SUMMARIES, {"checkInTimestampRange": ts_range, "page": 1, "size": 1})
+    member_id = (data.get("members") or [{}])[0].get("memberId")
+    if member_id:
+        for path in [f"/members/{member_id}", f"/members/{member_id}/checkins"]:
+            resp = requests.get(f"{BASE_URL}{path}", headers=abc_headers(), timeout=60)
+            print(f"{path.replace(member_id, '<id>')}: HTTP {resp.status_code}")
+            if resp.status_code == 200:
+                describe(resp.json())
+    resp = requests.get(f"{BASE_URL}/members", headers=abc_headers(), timeout=60, params={"page": 1, "size": 1})
+    print(f"/members (list): HTTP {resp.status_code}")
+    if resp.status_code == 200:
+        describe(resp.json())
+
+    slot_end = start + timedelta(minutes=SLOT_MINUTES) - timedelta(microseconds=1)
+    print(f"Slot check: {len(fetch_summaries(start.replace(hour=18), slot_end.replace(hour=18)))} members "
+          f"in the 6:00-6:{SLOT_MINUTES:02d} PM slot on {day}")
 
 
 def main():
@@ -282,7 +272,7 @@ def main():
     now = datetime.now(CLUB_TZ)
     today = now.date()
     # Hourly runs only redo today; the first runs after midnight also finish yesterday.
-    start = args.start or (today - timedelta(days=1) if now.hour < 2 else today)
+    start = args.start or (today - timedelta(days=1) if now.hour < 1 else today)
     end = args.end or today
 
     if args.probe:
