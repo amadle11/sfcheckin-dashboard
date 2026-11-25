@@ -211,6 +211,14 @@ def run_query_with_cutoff(query: str, cutoff_mmdd: str) -> pd.DataFrame:
     )
     return client.query(query, job_config=job_config).to_dataframe()
 
+@st.cache_data(ttl=600)
+def run_query_params(query: str, params: tuple) -> pd.DataFrame:
+    """params: tuple of (name, type, value), e.g. ("end_date", "DATE", date)."""
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter(n, t, v) for n, t, v in params]
+    )
+    return client.query(query, job_config=job_config).to_dataframe()
+
 CLUB_TZ = ZoneInfo("America/New_York")
 MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
@@ -538,20 +546,6 @@ ORDER BY visits DESC
 LIMIT 25
 """, selected_start, selected_end)
 
-inactive_members = run_query_with_dates("""
-SELECT
-  agreement_number,
-  ANY_VALUE(member_name) AS member_name,
-  COUNT(*) AS visits,
-  MAX(checkin_datetime) AS last_visit,
-  DATETIME_DIFF(CURRENT_DATETIME("America/New_York"), MAX(checkin_datetime), DAY) AS days_inactive
-FROM `sigfit.checkInData.checkin_clean`
-WHERE DATE(checkin_datetime) BETWEEN @start_date AND @end_date
-GROUP BY agreement_number
-ORDER BY days_inactive DESC
-LIMIT 25
-""", selected_start, selected_end)
-
 heatmap = run_query_with_dates("""
 SELECT
   CASE EXTRACT(DAYOFWEEK FROM checkin_datetime)
@@ -577,8 +571,6 @@ if not top_members.empty:
     top_members["first_visit"] = pd.to_datetime(top_members["first_visit"]).dt.strftime("%m/%d/%Y %I:%M %p")
     top_members["last_visit"] = pd.to_datetime(top_members["last_visit"]).dt.strftime("%m/%d/%Y %I:%M %p")
 
-if not inactive_members.empty:
-    inactive_members["last_visit"] = pd.to_datetime(inactive_members["last_visit"]).dt.strftime("%m/%d/%Y %I:%M %p")
 
 # --------------------------------------------------
 # KPI SECTION
@@ -716,17 +708,68 @@ st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
 # --------------------------------------------------
 # TABLES
 # --------------------------------------------------
-t1, t2 = st.columns(2)
+st.markdown('<div class="sf-card-title">Top Members</div>', unsafe_allow_html=True)
+st.markdown('<div class="sf-card-sub">Most active members in the selected range</div>', unsafe_allow_html=True)
+st.dataframe(top_members, width="stretch", hide_index=True)
 
-with t1:
-    st.markdown('<div class="sf-card-title">Top Members</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sf-card-sub">Most active members in the selected range</div>', unsafe_allow_html=True)
-    st.dataframe(top_members, width="stretch", hide_index=True)
+st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
 
-with t2:
-    st.markdown('<div class="sf-card-title">Inactive Members</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sf-card-sub">Longest gap since last recorded visit</div>', unsafe_allow_html=True)
-    st.dataframe(inactive_members, width="stretch", hide_index=True)
+# --------------------------------------------------
+# GHOST MEMBERS
+# --------------------------------------------------
+st.markdown('<div class="sf-card-title">Ghost Members</div>', unsafe_allow_html=True)
+st.markdown(
+    f'<div class="sf-card-sub">Active members with no check-in in the days leading up to '
+    f'{selected_end.strftime("%m/%d/%Y")} (the end of the selected range)</div>',
+    unsafe_allow_html=True,
+)
+
+ghost_days = st.selectbox("No check-in for at least", [14, 30, 60, 90], index=1,
+                          format_func=lambda d: f"{d} days")
+
+ghosts = run_query_params("""
+WITH visits AS (
+  SELECT
+    member_id,
+    MAX(checkin_datetime) AS last_visit,
+    COUNTIF(DATE(checkin_datetime) > DATE_SUB(@end_date, INTERVAL @days + 90 DAY)
+            AND DATE(checkin_datetime) <= DATE_SUB(@end_date, INTERVAL @days DAY)) AS visits_prior_90
+  FROM `sigfit.checkInData.checkins_raw`
+  WHERE DATE(checkin_datetime) <= @end_date
+  GROUP BY member_id
+)
+SELECT
+  m.agreement_number,
+  TRIM(CONCAT(IFNULL(m.first_name, ''), ' ', IFNULL(m.last_name, ''))) AS member_name,
+  v.last_visit,
+  DATE_DIFF(@end_date, DATE(v.last_visit), DAY) AS days_since_last_visit,
+  IFNULL(v.visits_prior_90, 0) AS visits_in_90_days_before
+FROM `sigfit.checkInData.members` m
+LEFT JOIN visits v USING (member_id)
+WHERE LOWER(IFNULL(m.member_status, '')) = 'active'
+  AND LOWER(IFNULL(m.join_status, '')) != 'prospect'
+  AND (v.last_visit IS NULL OR DATE(v.last_visit) <= DATE_SUB(@end_date, INTERVAL @days DAY))
+ORDER BY visits_in_90_days_before DESC, v.last_visit DESC
+""", (("end_date", "DATE", selected_end), ("days", "INT64", ghost_days)))
+
+if ghosts.empty:
+    st.info("No ghost members found for this date range.")
+else:
+    never = ghosts["last_visit"].isna()
+    g1, g2, g3 = st.columns(3)
+    g1.metric("Ghost members", f"{len(ghosts):,}")
+    g2.metric("Were regulars before going quiet", f"{int((ghosts['visits_in_90_days_before'] >= 4).sum()):,}",
+              help="4+ check-ins in the 90 days before they stopped coming. Best people to reach out to.")
+    g3.metric("No check-ins at all since Jan 2025", f"{int(never.sum()):,}")
+    show = ghosts.copy()
+    show["last_visit"] = pd.to_datetime(show["last_visit"]).dt.strftime("%m/%d/%Y %I:%M %p").fillna("None since Jan 2025")
+    show["days_since_last_visit"] = show["days_since_last_visit"].astype("Int64")
+    show = show.rename(columns={
+        "agreement_number": "Agreement #", "member_name": "Member", "last_visit": "Last visit",
+        "days_since_last_visit": "Days since last visit", "visits_in_90_days_before": "Visits in prior 90 days",
+    })
+    st.caption("Sorted with recent regulars first. Use the download icon on the table to export the list.")
+    st.dataframe(show, width="stretch", hide_index=True, height=400)
 
 st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
 
@@ -749,3 +792,77 @@ if not heatmap.empty:
     )
     fig_heat.update_layout(height=430, margin=dict(l=10, r=10, t=10, b=10))
     st.plotly_chart(fig_heat, width="stretch")
+
+st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
+
+# --------------------------------------------------
+# MEMBER LOOKUP
+# --------------------------------------------------
+st.markdown('<div class="sf-card-title">Member Lookup</div>', unsafe_allow_html=True)
+st.markdown('<div class="sf-card-sub">Search by name, agreement number or barcode. Shows all visits since Jan 2025.</div>',
+            unsafe_allow_html=True)
+
+search = st.text_input("Search member", placeholder="e.g. Smith, or an agreement number").strip()
+
+if len(search) >= 2:
+    matches = run_query_params("""
+    SELECT
+      member_id,
+      agreement_number,
+      TRIM(CONCAT(IFNULL(first_name, ''), ' ', IFNULL(last_name, ''))) AS member_name,
+      member_status
+    FROM `sigfit.checkInData.members`
+    WHERE LOWER(CONCAT(IFNULL(first_name, ''), ' ', IFNULL(last_name, ''))) LIKE CONCAT('%', LOWER(@q), '%')
+       OR agreement_number = @q
+       OR barcode = @q
+    ORDER BY LOWER(IFNULL(member_status, '')) = 'active' DESC, member_name
+    LIMIT 50
+    """, (("q", "STRING", search),))
+
+    if matches.empty:
+        st.info("No members found.")
+    else:
+        labels = [
+            f"{r.member_name} · #{r.agreement_number or '—'} · {r.member_status or 'unknown'}"
+            for r in matches.itertuples()
+        ]
+        pick = st.selectbox(f"{len(matches)} match(es){' (showing first 50)' if len(matches) == 50 else ''}",
+                            range(len(labels)), format_func=lambda i: labels[i])
+        member_id = matches.iloc[pick]["member_id"]
+
+        visits = run_query_params("""
+        SELECT checkin_datetime
+        FROM `sigfit.checkInData.checkins_raw`
+        WHERE member_id = @member_id
+        ORDER BY checkin_datetime DESC
+        """, (("member_id", "STRING", member_id),))
+
+        if visits.empty:
+            st.info("No check-ins for this member since Jan 2025.")
+        else:
+            vt = pd.to_datetime(visits["checkin_datetime"])
+            in_range = vt[(vt.dt.date >= selected_start) & (vt.dt.date <= selected_end)]
+            last = vt.max()
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Visits since Jan 2025", f"{len(vt):,}")
+            m2.metric("Visits in selected range", f"{len(in_range):,}")
+            m3.metric("Last visit", last.strftime("%m/%d/%Y"),
+                      help=f"{(full_max_date - last.date()).days} days before the latest data")
+            m4.metric("Usual time", vt.dt.hour.mode().map(
+                lambda h: pd.Timestamp(2000, 1, 1, int(h)).strftime("%I %p").lstrip("0")).iloc[0])
+
+            by_month = vt.dt.to_period("M").value_counts().sort_index()
+            by_month = by_month.reindex(pd.period_range(by_month.index.min(), pd.Period(full_max_date, "M")),
+                                        fill_value=0)
+            fig_member = px.bar(x=by_month.index.strftime("%b %Y"), y=by_month.values,
+                                labels={"x": "", "y": "Check-ins"}, color_discrete_sequence=["#2563eb"])
+            fig_member.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig_member, width="stretch")
+
+            recent = pd.DataFrame({
+                "Date": vt.dt.strftime("%m/%d/%Y"),
+                "Day": vt.dt.strftime("%A"),
+                "Time": vt.dt.strftime("%I:%M %p").str.lstrip("0"),
+            })
+            st.dataframe(recent.head(50), width="stretch", hide_index=True, height=300)
+            st.caption("Most recent 50 visits.")
