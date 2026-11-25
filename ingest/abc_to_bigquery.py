@@ -234,16 +234,41 @@ def load_day(client, day, rows):
 # --------------------------------------------------
 # Main
 # --------------------------------------------------
+SAFE_VALUE_HINTS = ("count", "timestamp", "club", "rel", "type", "status")
+
+
+def describe(value, indent="  ", key=""):
+    """Print structure: field names and types. Values only for non-personal fields
+    (counts, timestamps, club numbers, link types). Link URLs have ids masked."""
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if isinstance(v, (dict, list)):
+                print(f"{indent}{k}: {type(v).__name__}")
+                describe(v, indent + "  ", k)
+            else:
+                show = any(h in k.lower() for h in SAFE_VALUE_HINTS)
+                if k.lower() == "href" and isinstance(v, str):
+                    import re
+                    v, show = re.sub(r"[0-9a-fA-F-]{16,}", "<id>", v), True
+                print(f"{indent}{k}: {type(v).__name__}" + (f" = {v!r}" if show else ""))
+    elif isinstance(value, list):
+        print(f"{indent}[{len(value)} items]")
+        if value:
+            describe(value[0], indent + "  ", key)
+
+
 def probe(day):
-    """Print field names (never values) from the summaries endpoint."""
+    """Print the response structure from the summaries endpoint (no member data)."""
     start = datetime.combine(day, datetime.min.time())
-    members = fetch_summaries(start, start + timedelta(days=1) - timedelta(microseconds=1))
-    print(f"{SUMMARIES}: {len(members)} members on {day}")
-    if members:
-        print("  fields:", sorted(members[0].keys()))
-        print("  members with >1 check-in:", sum(int(m.get("checkInCount") or 0) > 1 for m in members))
-    rows = fetch_day(day)
-    print(f"  individual check-ins found after splitting: {len(rows)}")
+    end = start + timedelta(days=1) - timedelta(microseconds=1)
+    data = abc_get(SUMMARIES, {"checkInTimestampRange": f"{fmt(start)},{fmt(end)}", "page": 1, "size": 5})
+    print(f"{SUMMARIES} on {day}, first page of 5:")
+    print("top level:")
+    describe({k: v for k, v in data.items() if k != "members"})
+    members = data.get("members") or []
+    for i, m in enumerate(members[:2]):
+        print(f"member #{i + 1}:")
+        describe(m)
 
 
 def main():
