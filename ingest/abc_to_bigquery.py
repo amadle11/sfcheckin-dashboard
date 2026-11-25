@@ -3,7 +3,7 @@ Pull individual check-ins from the ABC Financial REST API and load them into Big
 
 Usage (normally run by GitHub Actions, see .github/workflows/ingest.yml):
 
-    python ingest/abc_to_bigquery.py                     # today + yesterday (club time)
+    python ingest/abc_to_bigquery.py                     # today (club time)
     python ingest/abc_to_bigquery.py --start 2026-06-01 --end 2026-11-24   # backfill
     python ingest/abc_to_bigquery.py --probe             # print API field names only, load nothing
     python ingest/abc_to_bigquery.py --setup             # create the table + view (safe to re-run)
@@ -92,23 +92,47 @@ def abc_get(path, params):
     return resp.json()
 
 
-def fetch_all_pages(path, day, list_keys):
-    """Fetch every page for one club-local day. Returns the list of records."""
-    ts_range = f"{day.isoformat()} 00:00:00.000000,{day.isoformat()} 23:59:59.999999"
+SUMMARIES = "/members/checkins/summaries"
+MIN_WINDOW = timedelta(minutes=5)
+
+
+def fmt(dt):
+    return dt.strftime("%Y-%m-%d %H:%M:%S.%f")
+
+
+def fetch_summaries(start, end):
+    """All member summaries for check-ins between start and end (club local time)."""
+    ts_range = f"{fmt(start)},{fmt(end)}"
     records, page = [], 1
     while True:
-        data = abc_get(path, {"checkInTimestampRange": ts_range, "page": page, "size": PAGE_SIZE})
-        batch = next((data[k] for k in list_keys if isinstance(data.get(k), list)), [])
-        if not batch:
-            return records, data
+        data = abc_get(SUMMARIES, {"checkInTimestampRange": ts_range, "page": page, "size": PAGE_SIZE})
+        batch = data.get("members") or []
         records.extend(batch)
-        if not (data.get("status") or {}).get("nextPage"):
-            return records, data
+        if not batch or not (data.get("status") or {}).get("nextPage"):
+            return records
         page += 1
 
 
+def fetch_window(start, end, out):
+    """
+    ABC's REST API has no per-check-in endpoint, only per-member summaries
+    (checkInCount + lastCheckInTimestamp) for a time range. When every member in a
+    window checked in once, lastCheckInTimestamp IS that check-in's time. If anyone
+    checked in more than once, split the window in half and try again. Most members
+    visit once a day, so a day usually takes only a handful of calls.
+    """
+    members = fetch_summaries(start, end)
+    multi = any(int(m.get("checkInCount") or 0) > 1 for m in members)
+    if multi and end - start > MIN_WINDOW:
+        mid = start + (end - start) / 2
+        fetch_window(start, mid, out)
+        fetch_window(mid + timedelta(microseconds=1), end, out)
+    else:
+        out.extend(members)
+
+
 def first(d, *keys):
-    """Return the first non-empty value among keys (handles slightly different field names)."""
+    """Return the first non-empty value among keys."""
     for k in keys:
         if isinstance(d, dict) and d.get(k) not in (None, ""):
             return d[k]
@@ -123,59 +147,42 @@ def parse_ts(value):
     return datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
 
 
-def flatten_details(records):
-    """
-    Turn the details response into one dict per check-in. Handles either shape:
-      {"checkins": [ {..., "memberId": ...}, ... ]}
-      {"members":  [ {"memberId": ..., "checkins": [ {...}, ... ]}, ... ]}
-    """
-    out = []
-    for rec in records:
-        nested = first(rec, "checkins", "checkIns", "checkInDetails")
-        if isinstance(nested, list):
-            for ci in nested:
-                out.append(({k: v for k, v in rec.items() if not isinstance(v, list)}, ci))
-        else:
-            out.append((rec.get("member") if isinstance(rec.get("member"), dict) else {}, rec))
-    return out
-
-
-def build_rows(day, details, names):
+def build_rows(day, members):
     loaded_at = datetime.now(timezone.utc).isoformat()
-    rows = []
-    for member, ci in flatten_details(details):
-        ts = parse_ts(first(ci, "checkInTimestamp", "checkInTimeStamp", "timestamp"))
-        if ts is None:
+    rows, seen = [], set()
+    for m in members:
+        ts = parse_ts(first(m, "lastCheckInTimestamp"))
+        member_id = first(m, "memberId")
+        if ts is None or ts.date() != day:
             continue
-        member_id = first(ci, "memberId") or first(member, "memberId", "id")
-        checkin_id = first(ci, "checkInId", "checkinId", "id")
-        if not checkin_id:
-            checkin_id = hashlib.sha1(f"{member_id}|{ts.isoformat()}".encode()).hexdigest()
-        person = names.get(member_id, {})
+        checkin_id = hashlib.sha1(f"{member_id}|{ts.isoformat()}".encode()).hexdigest()
+        if checkin_id in seen:
+            continue
+        seen.add(checkin_id)
         rows.append({
-            "checkin_id": str(checkin_id),
+            "checkin_id": checkin_id,
             "checkin_date": ts.date().isoformat(),
             "checkin_datetime": ts.strftime("%Y-%m-%d %H:%M:%S"),
             "member_id": str(member_id) if member_id else None,
-            "first_name": first(ci, "firstName") or first(member, "firstName") or person.get("firstName"),
-            "last_name": first(ci, "lastName") or first(member, "lastName") or person.get("lastName"),
-            "barcode": str(first(ci, "barcode") or first(member, "barcode") or person.get("barcode") or "") or None,
-            "checkin_status": first(ci, "checkInStatus", "status"),
-            "station": first(ci, "stationName", "station"),
-            "checkin_club": str(first(ci, "clubNumber", "checkInClubNumber") or "") or None,
-            "home_club": str(first(member, "homeClub") or first(ci, "homeClub") or "") or None,
-            "raw_json": json.dumps({"member": member, "checkin": ci}, default=str),
+            "first_name": first(m, "firstName"),
+            "last_name": first(m, "lastName"),
+            "barcode": str(first(m, "barcode") or "") or None,
+            "checkin_status": None,
+            "station": None,
+            "checkin_club": CLUB,
+            "home_club": str(first(m, "homeClub") or "") or None,
+            "raw_json": json.dumps(m, default=str),
             "loaded_at": loaded_at,
         })
-    return [r for r in rows if r["checkin_date"] == day.isoformat()]
+    return rows
 
 
 def fetch_day(day):
-    details, _ = fetch_all_pages("/members/checkins/details", day, ["checkins", "members"])
-    # The summaries endpoint (already proven in the old Apps Script) gives names + barcode.
-    summaries, _ = fetch_all_pages("/members/checkins/summaries", day, ["members"])
-    names = {s.get("memberId"): s for s in summaries}
-    return build_rows(day, details, names)
+    start = datetime.combine(day, datetime.min.time())
+    end = start + timedelta(days=1) - timedelta(microseconds=1)
+    members = []
+    fetch_window(start, end, members)
+    return build_rows(day, members)
 
 
 # --------------------------------------------------
@@ -228,19 +235,15 @@ def load_day(client, day, rows):
 # Main
 # --------------------------------------------------
 def probe(day):
-    """Print the response structure (field names only) so we can confirm the API shape."""
-    for path, keys in [("/members/checkins/details", ["checkins", "members"]),
-                       ("/members/checkins/summaries", ["members"])]:
-        records, raw = fetch_all_pages(path, day, keys)
-        print(f"\n{path}: {len(records)} records on {day}")
-        print("  top-level keys:", sorted(raw.keys()))
-        if records:
-            print("  record keys:", sorted(records[0].keys()))
-            for k, v in records[0].items():
-                if isinstance(v, list) and v and isinstance(v[0], dict):
-                    print(f"  {k}[0] keys:", sorted(v[0].keys()))
-                elif isinstance(v, dict):
-                    print(f"  {k} keys:", sorted(v.keys()))
+    """Print field names (never values) from the summaries endpoint."""
+    start = datetime.combine(day, datetime.min.time())
+    members = fetch_summaries(start, start + timedelta(days=1) - timedelta(microseconds=1))
+    print(f"{SUMMARIES}: {len(members)} members on {day}")
+    if members:
+        print("  fields:", sorted(members[0].keys()))
+        print("  members with >1 check-in:", sum(int(m.get("checkInCount") or 0) > 1 for m in members))
+    rows = fetch_day(day)
+    print(f"  individual check-ins found after splitting: {len(rows)}")
 
 
 def main():
@@ -251,8 +254,10 @@ def main():
     p.add_argument("--setup", action="store_true")
     args = p.parse_args()
 
-    today = datetime.now(CLUB_TZ).date()
-    start = args.start or today - timedelta(days=1)
+    now = datetime.now(CLUB_TZ)
+    today = now.date()
+    # Hourly runs only redo today; the first runs after midnight also finish yesterday.
+    start = args.start or (today - timedelta(days=1) if now.hour < 2 else today)
     end = args.end or today
 
     if args.probe:
