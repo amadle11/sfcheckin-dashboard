@@ -3,7 +3,7 @@ Pull individual check-ins from the ABC Financial REST API and load them into Big
 
 Usage (normally run by GitHub Actions, see .github/workflows/ingest.yml):
 
-    python ingest/abc_to_bigquery.py                     # today (club time)
+    python ingest/abc_to_bigquery.py                     # yesterday + today (club time)
     python ingest/abc_to_bigquery.py --start 2026-06-01 --end 2026-11-24   # backfill
     python ingest/abc_to_bigquery.py --probe             # print API field names only, load nothing
     python ingest/abc_to_bigquery.py --setup             # create the tables + view (safe to re-run)
@@ -279,8 +279,9 @@ def main():
 
     now = datetime.now(CLUB_TZ)
     today = now.date()
-    # Hourly runs only redo today; the first runs after midnight also finish yesterday.
-    start = args.start or (today - timedelta(days=1) if now.hour < 1 else today)
+    # Scheduled runs redo yesterday and today. GitHub sometimes skips scheduled runs,
+    # so this makes sure late-evening check-ins from yesterday are always picked up.
+    start = args.start or today - timedelta(days=1)
     end = args.end or today
 
     if args.probe:
