@@ -193,7 +193,11 @@ def setup(client):
     ds = client.create_dataset(f"{PROJECT}.{DATASET}", exists_ok=True)
     ds.default_table_expiration_ms = None
     ds.default_partition_expiration_ms = None
-    client.update_dataset(ds, ["default_table_expiration_ms", "default_partition_expiration_ms"])
+    try:
+        client.update_dataset(ds, ["default_table_expiration_ms", "default_partition_expiration_ms"])
+    except Exception as e:  # needs Data Owner/Admin; Data Editor can't change dataset settings
+        print(f"Could not clear dataset expiry ({type(e).__name__}). Clear it in the console: "
+              "checkInData > Edit details > untick 'Enable table expiration'.")
 
     table = bigquery.Table(RAW_TABLE, schema=SCHEMA)
     table.time_partitioning = bigquery.TimePartitioning(field="checkin_date", expiration_ms=None)
