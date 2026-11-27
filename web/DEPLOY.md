@@ -4,6 +4,19 @@ The app runs on **Cloud Run** in the existing `sigfit` Google Cloud project, nex
 BigQuery check-in data. People and projects are stored in **Firestore** in the same
 project. Sign-in is **Google**.
 
+## Quick way: one script
+
+Open the repo in Cloud Shell, then run the setup script. It does steps 1–5 below, asks for
+the admin email, and walks you through creating the Google sign-in client:
+
+```bash
+bash web/cloud-setup.sh
+```
+
+Re-running it later redeploys the latest code.
+
+## Step by step
+
 Run these once, in [Cloud Shell](https://shell.cloud.google.com) (already signed in as
 the project owner). Replace `you@gmail.com` with the admin's Google account.
 
