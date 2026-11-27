@@ -1,0 +1,34 @@
+{
+  "name": "sigfit-reporting",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@google-cloud/bigquery": "8.1.1",
+    "@google-cloud/firestore": "7.11.3",
+    "next": "15.5.29",
+    "next-auth": "5.0.0-beta.32",
+    "nodemailer": "10.6.1",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "recharts": "3.2.1",
+    "server-only": "^0.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.18.0",
+    "@types/nodemailer": "7.0.1",
+    "@types/react": "19.1.12",
+    "@types/react-dom": "19.1.9",
+    "typescript": "5.9.2"
+  },
+  "overrides": {
+    "nodemailer": "$nodemailer",
+    "postcss": "8.5.23",
+    "uuid": "11.1.1"
+  }
+}

@@ -8,6 +8,7 @@ Usage (normally run by GitHub Actions, see .github/workflows/ingest.yml):
     python ingest/abc_to_bigquery.py --probe             # print API field names only, load nothing
     python ingest/abc_to_bigquery.py --setup             # create the tables + view (safe to re-run)
     python ingest/abc_to_bigquery.py --members           # refresh member names (daily)
+    python ingest/abc_to_bigquery.py --discover          # try every known ABC endpoint, print field names only
 
 Environment variables:
     ABC_APP_ID, ABC_APP_KEY      ABC API credentials
@@ -268,6 +269,74 @@ def probe(day):
     describe(data)
 
 
+# Endpoints to try in --discover, by ABC API group. Paths are best guesses from ABC's
+# API groups (Members and Prospects, Clubs, Calendars, Employees); a 404 just means
+# that path doesn't exist for this account. Each call asks for one record only.
+DISCOVER = {
+    "Members and Prospects": [
+        "/members",
+        "/members/checkins/summaries",
+        "/members/personals",
+        "/members/agreements",
+        "/members/groups",
+        "/members/children",
+        "/prospects",
+    ],
+    "Clubs": [
+        "/clubs",
+        "/clubs/plans",
+        "/clubs/stations",
+        "/clubs/checkins/summaries",
+        "/clubs/checkins/details",
+        "/clubs/transactions/pos",
+        "/clubs/campaigns",
+    ],
+    "Calendars": [
+        "/calendars/events",
+        "/calendars/eventtypes",
+    ],
+    "Employees": [
+        "/employees",
+        "/employees/roles",
+    ],
+}
+
+
+def discover():
+    """Call each candidate endpoint once and print status + field names (no member data)."""
+    today = datetime.now(CLUB_TZ).date()
+    start = datetime.combine(today - timedelta(days=7), datetime.min.time())
+    end = datetime.combine(today, datetime.max.time())
+    ranges = {
+        "/clubs/checkins/details": {"checkInTimestampRange": f"{fmt(start)},{fmt(end)}"},
+        "/clubs/checkins/summaries": {"checkInTimestampRange": f"{fmt(start)},{fmt(end)}"},
+        "/members/checkins/summaries": {"checkInTimestampRange": f"{fmt(start)},{fmt(end)}"},
+        "/clubs/transactions/pos": {"transactionTimestampRange": f"{fmt(start)},{fmt(end)}"},
+        "/calendars/events": {"eventDateRange": f"{today - timedelta(days=7)},{today}"},
+    }
+    found = []
+    for group, paths in DISCOVER.items():
+        print(f"\n==================== {group} ====================")
+        for path in paths:
+            params = {**ranges.get(path, {}), "page": 1, "size": 1}
+            try:
+                resp = requests.get(f"{BASE_URL}{path}", headers=abc_headers(), params=params, timeout=60)
+            except requests.RequestException as err:
+                print(f"\n{path}: request failed ({type(err).__name__})")
+                continue
+            print(f"\n{path}: HTTP {resp.status_code}")
+            if resp.status_code == 200:
+                found.append(path)
+                try:
+                    describe(resp.json())
+                except ValueError:
+                    print("  (not JSON)")
+            else:
+                # Error bodies don't contain member data; keep them short.
+                print(f"  {resp.text[:200]}")
+    print(f"\nAvailable: {', '.join(found) or 'none'}")
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--start", type=date.fromisoformat)
@@ -275,7 +344,12 @@ def main():
     p.add_argument("--probe", action="store_true")
     p.add_argument("--setup", action="store_true")
     p.add_argument("--members", action="store_true", help="refresh the members table (names)")
+    p.add_argument("--discover", action="store_true", help="try every known ABC endpoint, print field names only")
     args = p.parse_args()
+
+    if args.discover:
+        discover()
+        return
 
     now = datetime.now(CLUB_TZ)
     today = now.date()
