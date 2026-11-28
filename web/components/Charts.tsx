@@ -36,3 +36,35 @@ export function Bars({ rows, x, y, height = 240 }: { rows: Record<string, string
     </ResponsiveContainer>
   );
 }
+
+/** Several series side by side per x value, e.g. joins vs ended per month. */
+export function GroupedBars({ rows, x, series, height = 280 }: {
+  rows: Record<string, string | number>[]; x: string; series: { key: string; label: string; color: string }[]; height?: number;
+}) {
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <BarChart data={rows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+        <CartesianGrid stroke="#eef0f3" vertical={false} />
+        <XAxis dataKey={x} tickLine={false} axisLine={false} fontSize={12} />
+        <YAxis tickLine={false} axisLine={false} fontSize={12} tickFormatter={fmt} width={48} />
+        <Tooltip formatter={(v) => fmt(Number(v))} cursor={{ fill: "#f3f4f6" }} />
+        <Legend />
+        {series.map((s) => <Bar key={s.key} dataKey={s.key} name={s.label} fill={s.color} radius={[3, 3, 0, 0]} />)}
+      </BarChart>
+    </ResponsiveContainer>
+  );
+}
+
+export function TrendLine({ rows, x, y, label, height = 220 }: { rows: Record<string, string | number>[]; x: string; y: string; label: string; height?: number }) {
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <LineChart data={rows} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+        <CartesianGrid stroke="#eef0f3" vertical={false} />
+        <XAxis dataKey={x} tickLine={false} axisLine={false} fontSize={12} />
+        <YAxis tickLine={false} axisLine={false} fontSize={12} tickFormatter={fmt} width={56} domain={["auto", "auto"]} />
+        <Tooltip formatter={(v) => fmt(Number(v))} />
+        <Line dataKey={y} name={label} stroke="#111111" strokeWidth={2.5} dot={false} />
+      </LineChart>
+    </ResponsiveContainer>
+  );
+}

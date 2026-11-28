@@ -4,6 +4,7 @@ import { menuByKey, MENUS } from "@/lib/menus";
 import { store } from "@/lib/store";
 import { byPriority, canView, isOpen, isOwner } from "@/lib/projects";
 import { recentCounts, yearToDate } from "@/lib/bigquery";
+import { memberSummary } from "@/lib/members";
 import { ProjectCard, ItemRow } from "@/components/ItemBits";
 import { Kpi, DataError, pct } from "@/components/Kpi";
 
@@ -19,6 +20,8 @@ async function ExecutiveSummary() {
   }
   const [recent, ytd] = data;
   const [prev, cur] = ytd.years.slice(-2);
+  // Member numbers are optional: the members table may not have the new columns yet.
+  const members = await memberSummary().catch(() => null);
   return (
     <>
       <div className="grid grid-4">
@@ -27,10 +30,18 @@ async function ExecutiveSummary() {
         {cur && <Kpi label={`Check-ins, ${cur.year} to date`} value={n(cur.checkins)} change={prev ? pct(cur.checkins, prev.checkins) : null} note={prev ? `vs ${prev.year}` : undefined} />}
         {cur && <Kpi label={`Unique members, ${cur.year} to date`} value={n(cur.uniqueMembers)} change={prev ? pct(cur.uniqueMembers, prev.uniqueMembers) : null} note={prev ? `vs ${prev.year}` : undefined} />}
       </div>
+      {members && (
+        <div className="grid grid-4" style={{ marginTop: 14 }}>
+          <Kpi label="Active members" value={n(members.active)} />
+          <Kpi label="Joined this month" value={n(members.joinsMonth)} />
+          <Kpi label="Net this month" value={(members.joinsMonth - members.endedMonth >= 0 ? "+" : "") + n(members.joinsMonth - members.endedMonth)} note="joins minus ended" />
+          <Kpi label="Ghost members" value={n(members.ghosts)} note="active, no visit in 30+ days" />
+        </div>
+      )}
       <p className="small muted">
-        Members, class attendance, PT, revenue and juice bar margin join this summary as each area is built:{" "}
+        Class attendance, PT, revenue and juice bar margin join this summary as each area is built:{" "}
         {MENUS.filter((m) => m.phase).map((m) => `${m.label} (Phase ${m.phase})`).join(", ")}.{" "}
-        <Link href="/checkin">Open Check-In →</Link>
+        <Link href="/checkin">Check-In →</Link> · <Link href="/members">Members →</Link>
       </p>
     </>
   );

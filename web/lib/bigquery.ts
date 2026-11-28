@@ -4,13 +4,13 @@ import "server-only";
 // On Cloud Run the service's own account is used; locally set
 // GOOGLE_APPLICATION_CREDENTIALS or GCP_SERVICE_ACCOUNT_JSON.
 
-const PROJECT = process.env.BQ_PROJECT || "sigfit";
+export const PROJECT = process.env.BQ_PROJECT || "sigfit";
 const CLEAN = `\`${PROJECT}.checkInData.checkin_clean\``;
 const RAW = `\`${PROJECT}.checkInData.checkins_raw\``;
 const CACHE_MS = 10 * 60 * 1000;
 
-type Params = Record<string, string | number>;
-type Row = Record<string, unknown>;
+export type Params = Record<string, string | number>;
+export type Row = Record<string, unknown>;
 
 const g = globalThis as unknown as {
   __bq?: Promise<import("@google-cloud/bigquery").BigQuery>;
@@ -25,7 +25,7 @@ function client() {
   return g.__bq;
 }
 
-async function query<T extends Row>(sql: string, params: Params = {}): Promise<T[]> {
+export async function query<T extends Row>(sql: string, params: Params = {}): Promise<T[]> {
   const cache = (g.__bqCache ??= new Map());
   const key = sql + JSON.stringify(params);
   const hit = cache.get(key);
@@ -41,7 +41,7 @@ async function query<T extends Row>(sql: string, params: Params = {}): Promise<T
   return plain as T[];
 }
 
-const num = (v: unknown) => Number(v ?? 0);
+export const num = (v: unknown) => Number(v ?? 0);
 
 export interface YearToDate {
   year: number;

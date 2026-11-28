@@ -33,7 +33,7 @@ export const MENUS: Menu[] = [
   { key: "executive", label: "Executive Summary", href: "/", section: "Reporting" },
   { key: "checkin", label: "Check-In", href: "/checkin", section: "Reporting" },
   {
-    key: "members", label: "Member Demographics", href: "/area/members", section: "Reporting", phase: 2,
+    key: "members", label: "Members", href: "/members", section: "Reporting",
     blurb: "Active members, joins vs cancels, net impact and demographics from ABC. Replaces SF Member Trends and Net Impact Member Analysis.",
   },
   {
@@ -49,7 +49,7 @@ export const MENUS: Menu[] = [
     blurb: "Sales and PT commissions, with inputs from ABC where possible.",
   },
   {
-    key: "billing", label: "Billing", href: "/area/billing", section: "Reporting", phase: 5,
+    key: "billing", label: "Billing", href: "/billing", section: "Reporting",
     blurb: "Collections, freezes and coupons vs sales.",
   },
   {
