@@ -7,10 +7,10 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "normal (check-ins), members (refresh names), setup (create tables/view), or probe"
+        description: "normal (check-ins), members (refresh names), setup (create tables/view), probe, or discover (list every ABC endpoint's fields)"
         default: normal
         type: choice
-        options: [normal, members, setup, probe]
+        options: [normal, members, setup, probe, discover]
       start:
         description: "Backfill start date, YYYY-MM-DD (optional)"
         required: false
@@ -49,6 +49,7 @@ jobs:
           ARGS=""
           [ "$MODE" = "setup" ] && ARGS="$ARGS --setup"
           [ "$MODE" = "probe" ] && ARGS="$ARGS --probe"
+          [ "$MODE" = "discover" ] && ARGS="$ARGS --discover"
           [ "$MODE" = "members" ] && ARGS="$ARGS --members"
           [ -n "$START" ] && ARGS="$ARGS --start $START"
           [ -n "$END" ] && ARGS="$ARGS --end $END"

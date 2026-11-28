@@ -37,3 +37,11 @@ block with the new key's values (same format as before). Keep `app_password` as 
 After that, the hourly schedule keeps today up to date and refreshes names daily on its own.
 
 Note: Actions logs in a public repo are public. The script only logs counts and field names, never member data.
+
+## Discover every ABC endpoint
+
+To see what else the ABC API can give us (Members and Prospects, Clubs, Calendars,
+Employees), run the workflow manually with **mode = discover**: Actions → "ABC
+check-ins to BigQuery" → Run workflow. It calls each endpoint once for a single record
+and logs the HTTP status and field *names* only, never member values, so it's safe in a
+public repo's logs. Nothing is written to BigQuery.
